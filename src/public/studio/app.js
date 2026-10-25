@@ -39,7 +39,7 @@ function render(next) {
  const box=document.createElement('div');box.className='composer';
  const prompt=document.createElement('textarea');prompt.placeholder=p[3];prompt.setAttribute('aria-label','Descreva sua criação');prompt.maxLength=10000;prompt.value=user.drafts.find(d=>d.kind===page)?.prompt || '';box.append(prompt);
  const options={}; if(page!=='chat') addMediaControls(box,page,options);
- const bar=document.createElement('div');bar.className='composer-bar';bar.append(text('span',page==='chat'?'Rascunho de conversa':'Rascunho de criação','chip'));const save=text('button','Salvar ideia','primary');bar.append(save);box.append(bar);root.append(box);
+ const bar=document.createElement('div');bar.className='composer-bar';bar.append(text('span',page==='chat'?'Claude Opus 5.5 · Raciocínio alto':'Rascunho de criação','chip'));const save=text('button','Salvar ideia','primary');bar.append(save);box.append(bar);root.append(box);
  const send=page==='chat'?text('button','Enviar mensagem','primary'):null;if(send)bar.append(send);
  const generate=page==='chat'?null:text('button',user.mediaConnected?'Gerar agora':'Geração indisponível','primary');if(generate){generate.disabled=!user.mediaConnected;bar.append(generate);}
  root.append(text('p',page==='chat'?'Pesquisa web automática para dados atuais. Confira as fontes. As conversas ficam na sua conta.':user.mediaConnected?'Gerar utiliza os créditos da conta fal.ai do administrador. Os resultados ficam no seu histórico; os links dos arquivos são hospedados pela fal.ai e podem expirar.':'A geração ainda não está conectada. Você pode salvar sua ideia para depois.','notice'));

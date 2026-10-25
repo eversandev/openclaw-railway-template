@@ -18,7 +18,10 @@ export async function runStudioCli(args, timeout=120000) {
 }
 export async function runStudioChat(messages) {
   const model=async prompt=>{
-    const result=await runStudioCli(['infer','model','run','--local','--agent','main','--prompt',prompt,'--json']);
+    const args=['infer','model','run','--local','--agent','main','--prompt',prompt,'--json'];
+    if(process.env.STUDIO_CHAT_MODEL)args.push('--model',process.env.STUDIO_CHAT_MODEL);
+    if(process.env.STUDIO_CHAT_THINKING)args.push('--thinking',process.env.STUDIO_CHAT_THINKING);
+    const result=await runStudioCli(args);
     const text=result.outputs?.map(o=>o.text||'').join('\n').trim();if(result.ok&&text)return text;throw new Error('No model response');
   };
   const instructions='Você é o Chat Forgenox. Responda em português, a menos que a pessoa peça outro idioma. Você tem pesquisa web de leitura: para clima, previsão, notícias, preços e fatos atuais, peça uma consulta retornando APENAS um objeto JSON {"web_search":"consulta específica incluindo cidade e data quando relevante"}. Use o histórico para resolver referências como a cidade citada anteriormente. Se faltar a cidade, pergunte qual é. Para perguntas que não precisam de pesquisa, responda normalmente. Não afirme que não tem internet: você pode solicitar a consulta. Não afirme ter executado outras ferramentas ou gerado arquivos. Data e hora UTC: '+new Date().toISOString()+'.\nConversa: '+JSON.stringify(messages);
