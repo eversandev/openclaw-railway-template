@@ -7,6 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import express from "express";
+import { mountStudio } from "./studio.js";
 import httpProxy from "http-proxy";
 import {
   canServeGatewayRequest,
@@ -581,6 +582,7 @@ function requireSetupAuth(req, res, next) {
 const app = express();
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
+mountStudio(app, { stateDir: STATE_DIR });
 
 app.get("/styles.css", (_req, res) => {
   res.sendFile(path.join(process.cwd(), "src", "public", "styles.css"));
