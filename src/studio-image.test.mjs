@@ -8,3 +8,9 @@ test('Image requests read site references before generation and request a single
 test('Unavailable references stop before a paid image request',async()=>{
  await assert.rejects(prepareImagePrompt('Arte https://example.com',async()=>({ok:false})),/Não consegui ler/);
 });
+
+import {publicAddress} from './studio-reference.js';
+test('Website references reject local, private and metadata addresses',()=>{
+ for(const ip of ['127.0.0.1','10.0.0.1','169.254.169.254','192.168.1.1','100.64.0.1','::1','::ffff:127.0.0.1','fc00::1'])assert.equal(publicAddress(ip),false,ip);
+ assert.equal(publicAddress('1.1.1.1'),true);assert.equal(publicAddress('2606:4700:4700::1111'),true);
+});
