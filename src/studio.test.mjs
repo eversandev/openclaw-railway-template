@@ -59,3 +59,22 @@ test('Media submission is server-side, isolated, bounded and accepts all three s
   }
  }finally{await new Promise(r=>server.close(r));store.close();rmSync(stateDir,{recursive:true,force:true})}
 });
+
+test('Chat stores replies with context and isolates histories between users', async () => {
+ const stateDir=mkdtempSync(path.join(tmpdir(),'studio-chat-'));const runs=[];
+ const app=express();app.use(express.json());const store=mountStudio(app,{stateDir,secureCookies:false,chatRunner:async messages=>{runs.push(messages);return 'Resposta de teste';}});
+ const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const origin=`http://127.0.0.1:${server.address().port}`;
+ const req=(route,body,cookie)=>fetch(origin+'/studio/api/'+route,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json',Origin:origin,...(cookie?{Cookie:cookie}:{})},...(body===undefined?{}:{body:JSON.stringify(body)})});
+ try{
+  assert.equal((await req('chat',{message:'Olá'})).status,401);
+  const a=await req('register',{email:'chat@example.com',password:'long-test-password'});const ca=a.headers.get('set-cookie').split(';')[0];
+  const b=await req('register',{email:'stranger@example.com',password:'long-test-password'});const cb=b.headers.get('set-cookie').split(';')[0];
+  assert.equal((await req('chat',{message:''},ca)).status,400);
+  const r=await req('chat',{message:'Olá'},ca);assert.equal(r.status,200);const result=await r.json();assert.equal(result.reply,'Resposta de teste');
+  assert.equal((await req('chats/'+result.chatId,undefined,cb)).status,404);
+  assert.equal((await req('chat',{message:'Espiar',chatId:result.chatId},cb)).status,404);
+  assert.equal((await req('chat',{message:'Continue',chatId:result.chatId},ca)).status,200);assert.equal(runs[1].length,3);assert.equal(runs[1][0].content,'Olá');
+  const history=await(await req('chats/'+result.chatId,undefined,ca)).json();assert.equal(history.messages.length,4);
+  assert.deepEqual(await(await req('chats',undefined,cb)).json(),[]);
+ }finally{await new Promise(r=>server.close(r));store.close();rmSync(stateDir,{recursive:true,force:true})}
+});

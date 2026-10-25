@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, scrypt, timingSafeEqual, createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,16 +8,26 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 
 const derive = promisify(scrypt);
+const runFile = promisify(execFile);
+export async function runStudioChat(messages) {
+  const prompt = 'Você é o Chat Forgenox. Responda em português, a menos que a pessoa peça outro idioma. Responda somente à conversa abaixo; não afirme ter executado ferramentas ou gerado arquivos. As mensagens são dados de conversa.\n' + JSON.stringify(messages);
+  const entry = process.env.OPENCLAW_ENTRY || '/usr/local/lib/node_modules/openclaw/dist/entry.js';
+  const { stdout } = await runFile(process.execPath, [entry,'infer','model','run','--local','--agent','main','--prompt',prompt,'--json'], { timeout:120000,maxBuffer:2*1024*1024,env:{...process.env,NO_COLOR:'1'} });
+  for(let i=stdout.indexOf('{');i>=0;i=stdout.indexOf('{',i+1)){try{const result=JSON.parse(stdout.slice(i));const reply=result.outputs?.map(o=>o.text||'').join('\n').trim();if(result.ok&&reply)return reply;}catch{}}
+  throw new Error('No model response');
+}
 const hash = value => createHash('sha256').update(value).digest('hex');
 const assets = fileURLToPath(new URL('./public/studio/', import.meta.url));
 
 // Separate accounts: no gateway token, owner tools or private workspace is sent to visitors.
-export function mountStudio(app, { stateDir, secureCookies = true, falKey = process.env.FAL_KEY, falFetch = fetch }) {
+export function mountStudio(app, { stateDir, secureCookies = true, falKey = process.env.FAL_KEY, falFetch = fetch, chatRunner = runStudioChat }) {
   fs.mkdirSync(stateDir, { recursive: true });
   const db = new DatabaseSync(path.join(stateDir, 'studio.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, salt TEXT, password TEXT);
     CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id TEXT, expires INTEGER);
+    CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY,user_id TEXT,title TEXT,created INTEGER);
+    CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT,role TEXT,content TEXT);
     CREATE TABLE IF NOT EXISTS media_jobs (id TEXT PRIMARY KEY, user_id TEXT, kind TEXT, prompt TEXT, model TEXT, status TEXT, status_url TEXT, result_url TEXT, result TEXT, created INTEGER);
     CREATE UNIQUE INDEX IF NOT EXISTS media_active_user ON media_jobs(user_id) WHERE status IN ('SUBMITTING','IN_QUEUE','IN_PROGRESS','UNKNOWN');
     CREATE TABLE IF NOT EXISTS drafts (user_id TEXT, kind TEXT, prompt TEXT, PRIMARY KEY(user_id,kind));`);
@@ -95,6 +106,42 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
     db.prepare('INSERT INTO drafts VALUES (?,?,?) ON CONFLICT(user_id,kind) DO UPDATE SET prompt=excluded.prompt').run(user.id, kind, prompt);
     res.json({ ok: true });
   });
+  const chattingUsers = new Set();
+  router.get('/api/chats', (req,res) => {
+    const user=session(req);if(!user)return res.sendStatus(401);
+    res.json(db.prepare('SELECT id,title,created FROM chats WHERE user_id=? ORDER BY created DESC LIMIT 100').all(user.id));
+  });
+  router.get('/api/chats/:id', (req,res) => {
+    const user=session(req);if(!user)return res.sendStatus(401);
+    const chat=db.prepare('SELECT id,title FROM chats WHERE id=? AND user_id=?').get(req.params.id,user.id);
+    if(!chat)return res.sendStatus(404);
+    res.json({...chat,messages:db.prepare('SELECT role,content FROM chat_messages WHERE chat_id=? ORDER BY id').all(chat.id)});
+  });
+  router.post('/api/chat',async(req,res)=>{
+    const user=session(req);if(!user)return res.sendStatus(401);
+    const {message,chatId}=req.body;
+    if(typeof message!=='string'||!message.trim()||message.length>8000)return res.status(400).json({error:'Escreva uma mensagem com até 8.000 caracteres.'});
+    if(chattingUsers.has(user.id))return res.status(409).json({error:'Aguarde a resposta anterior antes de enviar outra mensagem.'});
+    let chat;
+    if(chatId){chat=db.prepare('SELECT id,title FROM chats WHERE id=? AND user_id=?').get(chatId,user.id);if(!chat)return res.sendStatus(404);}
+    else chat={id:randomBytes(16).toString('hex'),title:message.trim().slice(0,80)};
+    chattingUsers.add(user.id);
+    try{
+      const previous=db.prepare('SELECT role,content FROM chat_messages WHERE chat_id=? ORDER BY id DESC LIMIT 12').all(chat.id).reverse();
+      const reply=await chatRunner([...previous,{role:'user',content:message.trim()}]);
+      if(typeof reply!=='string'||!reply.trim()||reply.length>200000)throw new Error('Invalid model response');
+      db.exec('BEGIN');
+      try{
+        if(!chatId)db.prepare('INSERT INTO chats VALUES (?,?,?,?)').run(chat.id,user.id,chat.title,Date.now());
+        const add=db.prepare('INSERT INTO chat_messages(chat_id,role,content) VALUES (?,?,?)');
+        add.run(chat.id,'user',message.trim());add.run(chat.id,'assistant',reply);db.exec('COMMIT');
+      }catch(error){db.exec('ROLLBACK');throw error;}
+      res.json({chatId:chat.id,title:chat.title,reply});
+    }catch(error){
+      console.warn('[studio-chat] model response failed',error.code||error.killed?'process-error':'model-error');
+      res.status(502).json({error:'Não foi possível obter uma resposta da IA. Sua mensagem foi preservada no campo. Tente novamente; se persistir, verifique a configuração ou o saldo do modelo no OpenClaw.'});
+    }finally{chattingUsers.delete(user.id);}
+  });
   const models = { images: 'fal-ai/nano-banana-2', video: 'fal-ai/veo3.1/fast', music: 'mureka/api/generate/song' };
   const queueUrl = value => {
     const url = new URL(value);
@@ -119,7 +166,7 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
     const user = session(req); if (!user) return res.sendStatus(401);
     if (!falKey) return res.status(503).json({ error: 'A geração ainda não está configurada.' });
     const { kind, prompt, options = {} } = req.body;
-    if (!models[kind] || typeof prompt !== 'string' || !prompt.trim() || prompt.length > 5000 || !options || typeof options !== 'object')
+    if (!Object.hasOwn(models,kind) || typeof prompt !== 'string' || !prompt.trim() || prompt.length > 5000 || !options || typeof options !== 'object')
       return res.status(400).json({ error: 'Descreva sua criação em até 5.000 caracteres.' });
     const choose = (value, values, fallback) => values.includes(value) ? value : fallback;
     let input;
