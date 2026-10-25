@@ -3,7 +3,7 @@ let creating = false, user, page = 'chat', mediaTimer, chatBusy=false;
 const modelNames={images:'Nano Banana 2',video:'Veo 3.1 Fast',music:'Mureka 9.5'};
 const pages = {
  chat: ['SEU ESPAÇO CRIATIVO','O que vamos criar hoje?','Comece com uma ideia. Prepare seu próximo texto, imagem, música ou vídeo em um só lugar.','Descreva o que você tem em mente…'],
- images: ['CRIAR IMAGEM','Dê forma à sua imaginação.','Descreva a cena, o estilo e os detalhes. Escolha o formato e gere sua imagem com IA.','Uma fotografia cinematográfica de…'],
+ images: ['CRIAR IMAGEM','Dê forma à sua imaginação.','Descreva a arte, o estilo e o texto. Links são lidos como referência de conteúdo. Cada geração cria uma imagem; para carrossel, começamos pela capa.','Uma fotografia cinematográfica de…'],
  video: ['CRIAR VÍDEO','Toda história começa com uma cena.','Descreva o movimento, o cenário e a atmosfera do seu próximo vídeo.','Um vídeo de 5 segundos mostrando…'],
  music: ['MÚSICA','Encontre o som da sua ideia.','Defina o estilo, os instrumentos e o sentimento da sua próxima composição.','Uma trilha instrumental com…']
 };

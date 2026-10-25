@@ -50,7 +50,7 @@ test('Media submission is server-side, isolated, bounded and accepts all three s
    const response=await req('media',{kind,prompt:'Teste de geração',options:{ratio:'9:16',duration:'4s',resolution:'720p',lyrics:'Letra original de teste'}},cookie);assert.equal(response.status,202);
    const job=await response.json();assert.equal(JSON.stringify(job).includes('test-secret'),false);assert.equal('status_url' in job,false);
    const call=calls.findLast(c=>c.options.method==='POST');const input=JSON.parse(call.options.body);
-   assert.equal(call.options.headers.Authorization,'Key test-secret');assert.equal(input.prompt,'Teste de geração');
+   assert.equal(call.options.headers.Authorization,'Key test-secret');assert.ok(input.prompt.includes('Teste de geração'));
    if(kind==='images')assert.equal(input.num_images,1);if(kind==='video')assert.equal(input.duration,'4s');if(kind==='music')assert.equal(input.lyrics,'Letra original de teste');
    const before=calls.length;assert.equal((await req('media',{kind,prompt:'duplicate'},cookie)).status,409);assert.equal(calls.length,before);
    const stranger=await req('register',{email:kind+'@other.example',password:'another-long-password'});const other=stranger.headers.get('set-cookie').split(';')[0];
