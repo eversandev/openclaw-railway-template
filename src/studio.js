@@ -49,6 +49,7 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
     CREATE TABLE IF NOT EXISTS media_jobs (id TEXT PRIMARY KEY, user_id TEXT, kind TEXT, prompt TEXT, model TEXT, status TEXT, status_url TEXT, result_url TEXT, result TEXT, created INTEGER);
     CREATE UNIQUE INDEX IF NOT EXISTS media_active_user ON media_jobs(user_id) WHERE status IN ('SUBMITTING','IN_QUEUE','IN_PROGRESS','UNKNOWN');
     CREATE TABLE IF NOT EXISTS drafts (user_id TEXT, kind TEXT, prompt TEXT, PRIMARY KEY(user_id,kind));`);
+  if(!db.prepare('PRAGMA table_info(media_jobs)').all().some(c=>c.name==='error'))db.exec('ALTER TABLE media_jobs ADD COLUMN error TEXT');
   fs.chmodSync(path.join(stateDir, 'studio.sqlite'), 0o600);
   const router = express.Router();
   const cookieName = secureCookies ? '__Host-studio' : 'studio-local';
@@ -166,19 +167,21 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
     if (url.protocol !== 'https:' || url.hostname !== 'queue.fal.run' || url.username || url.password || url.port) throw new Error('Invalid provider URL');
     return url.href;
   };
-  const publicJob = job => ({ id: job.id, kind: job.kind, prompt: job.prompt, model: job.model, status: job.status, created: job.created, result: JSON.parse(job.result || '[]') });
+  const publicJob = job => ({ id: job.id, kind: job.kind, prompt: job.prompt, model: job.model, status: job.status, created: job.created, result: JSON.parse(job.result || '[]'), error: job.error || null });
   const safeMedia = data => {
     const values = [...(data.images || []), data.video, data.audio, data.audio_url ? { url: data.audio_url } : null].filter(Boolean);
     return values.filter(v => { try { return new URL(v.url).protocol === 'https:'; } catch { return false; } }).map(v => ({ url: v.url }));
   };
   const falRequest = async (url, options = {}) => {
     const response = await falFetch(queueUrl(url), { ...options, headers: { 'Authorization': `Key ${falKey}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000), redirect: 'error' });
-    if (!response.ok) { const error = new Error('Provider request failed'); error.providerStatus = response.status; throw error; }
+    if (!response.ok) { const error = new Error('Provider request failed'); error.providerStatus = response.status;const body=await response.json().catch(()=>({}));const details=Array.isArray(body.detail)?body.detail.map(d=>[...(d.loc||[]),d.msg,d.type].filter(Boolean).join(': ')).join('; '):typeof body.detail==='string'?body.detail:typeof body.error==='string'?body.error:'';error.publicDetail=details.replace(/https?:\/\/\S+/g,'[link]').replace(/(?:fal_sk_|Key\s+)[^\s]+/gi,'[oculto]').slice(0,600);throw error; }
     return response.json();
   };
-  router.get('/api/media', (req, res) => {
+  router.get('/api/media', async (req, res) => {
     const user = session(req); if (!user) return res.sendStatus(401);
-    res.json(db.prepare('SELECT * FROM media_jobs WHERE user_id=? ORDER BY created DESC LIMIT 50').all(user.id).map(publicJob));
+    const jobs=db.prepare('SELECT * FROM media_jobs WHERE user_id=? ORDER BY created DESC LIMIT 50').all(user.id);
+    await Promise.all(jobs.filter(j=>j.status==='FAILED'&&!j.error&&j.result_url).slice(0,5).map(async job=>{try{await falRequest(job.result_url)}catch(error){if(error.publicDetail){job.error=error.publicDetail;db.prepare('UPDATE media_jobs SET error=? WHERE id=?').run(job.error,job.id)}}}));
+    res.json(jobs.map(publicJob));
   });
   router.post('/api/media', async (req, res) => {
     const user = session(req); if (!user) return res.sendStatus(401);
@@ -198,7 +201,7 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
       }
     }
     const id = randomBytes(16).toString('hex');
-    try { db.prepare('INSERT INTO media_jobs VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,user.id,kind,prompt.trim(),models[kind],'SUBMITTING',null,null,null,Date.now()); }
+    try { db.prepare('INSERT INTO media_jobs (id,user_id,kind,prompt,model,status,status_url,result_url,result,created) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,user.id,kind,prompt.trim(),models[kind],'SUBMITTING',null,null,null,Date.now()); }
     catch { return res.status(409).json({ error: 'Você já tem uma geração em andamento. Aguarde o resultado.' }); }
     try {
       const job = await falRequest(`https://queue.fal.run/${models[kind]}`, { method: 'POST', body: JSON.stringify(input) });
@@ -223,9 +226,9 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
         try {
           const data = await falRequest(job.result_url);
           const media = safeMedia(data);
-          db.prepare('UPDATE media_jobs SET status=?,result=? WHERE id=?').run(media.length?'COMPLETED':'FAILED',JSON.stringify(media),job.id);
+          db.prepare('UPDATE media_jobs SET status=?,result=? WHERE id=?').run(media.length?'COMPLETED':'FAILED',JSON.stringify(media),job.id);if(!media.length)db.prepare('UPDATE media_jobs SET error=? WHERE id=?').run('O modelo terminou sem retornar uma imagem, vídeo ou áudio. Descreva diretamente o conteúdo visual que deseja criar.',job.id);
         } catch(error) {
-          if (error.providerStatus === 400 || error.providerStatus === 422) db.prepare('UPDATE media_jobs SET status=? WHERE id=?').run('FAILED',job.id);
+          if (error.providerStatus === 400 || error.providerStatus === 422) db.prepare('UPDATE media_jobs SET status=?,error=? WHERE id=?').run('FAILED',error.publicDetail||'A fal.ai recusou os dados desta geração (HTTP '+error.providerStatus+').',job.id);
           else throw error;
         }
       } else if (['IN_QUEUE','IN_PROGRESS'].includes(status.status)) {
