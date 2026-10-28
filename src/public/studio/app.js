@@ -1,0 +1,171 @@
+const $ = s => document.querySelector(s);
+let creating = false, user, page = 'chat', mediaTimer, chatBusy=false;
+const modelNames={images:'Nano Banana 2',video:'Veo 3.1 Fast',music:'Mureka 9.5'};
+const pages = {
+ chat: ['SEU ESPAÇO CRIATIVO','O que vamos criar hoje?','Comece com uma ideia. Prepare seu próximo texto, imagem, música ou vídeo em um só lugar.','Descreva o que você tem em mente…'],
+ images: ['CRIAR IMAGEM','Dê forma à sua imaginação.','Descreva a arte, o estilo e o texto. Links são lidos como referência de conteúdo. Cada geração cria uma imagem; para carrossel, começamos pela capa.','Uma fotografia cinematográfica de…'],
+ video: ['CRIAR VÍDEO','Toda história começa com uma cena.','Descreva o movimento, o cenário e a atmosfera do seu próximo vídeo.','Um vídeo de 5 segundos mostrando…'],
+ music: ['MÚSICA','Encontre o som da sua ideia.','Defina o estilo, os instrumentos e o sentimento da sua próxima composição.','Uma trilha instrumental com…']
+};
+async function api(route, body) {
+ const response = await fetch('/studio/api/' + route, body === undefined ? {} : { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+ const data = await response.json().catch(() => ({}));
+ if (!response.ok) throw new Error(data.error || 'Não foi possível concluir. Tente entrar novamente.');
+ return data;
+}
+function text(tag, value, cls) { const el = document.createElement(tag); el.textContent = value; if(cls) el.className = cls; return el; }
+function renderHistory() {
+ $('#draft-list').replaceChildren();
+ for(const chat of user.chats||[]){const button=text('button','▢ '+chat.title);button.onclick=async()=>{try{user.currentChat=await api('chats/'+chat.id);render('chat');}catch{}};$('#draft-list').append(button);}
+ for(const draft of user.drafts.filter(d => d.prompt.trim())) { const button=text('button', draft.prompt);button.onclick=()=>render(draft.kind);$('#draft-list').append(button); }
+ if(!$('#draft-list').children.length) $('#draft-list').append(text('p','Suas ideias salvas aparecerão aqui.','empty'));
+}
+function render(next) {
+ clearTimeout(mediaTimer);window.scrollTo({top:0}); page = next; $('#sidebar').classList.remove('open');
+ document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+ const root = $('#page-content'); root.replaceChildren();root.className='';
+ $('#breadcrumb').textContent = ({chat:'Seu espaço criativo',images:'Imagens',video:'Vídeo',music:'Música',search:'Pesquisar',files:'Arquivos e documentos',agent:'Agent'})[page];
+ if(['images','video','music'].includes(page)){renderCreationPage(root,page);return;}
+ if(page === 'search') {
+  root.append(text('p','SUA BIBLIOTECA','eyebrow'),text('h1','Encontre suas ideias.'));
+  const input=document.createElement('input');input.className='search-input';input.placeholder='Pesquisar chats e ideias…';input.setAttribute('aria-label','Pesquisar chats e ideias');root.append(input);
+  const results=document.createElement('div');root.append(results);
+  const search=()=>{results.replaceChildren(); for(const chat of (user.chats||[]).filter(c=>c.title.toLowerCase().includes(input.value.toLowerCase()))){const b=text('button','Conversa · '+chat.title,'list-item');b.onclick=async()=>{user.currentChat=await api('chats/'+chat.id);render('chat')};results.append(b)}const matches=user.drafts.filter(d=>d.prompt.trim()&&d.prompt.toLowerCase().includes(input.value.toLowerCase()));for(const d of matches){const b=text('button',d.prompt,'list-item');b.onclick=()=>render(d.kind);results.append(b)}if(!results.children.length)results.append(text('p','Nenhum rascunho encontrado.','muted'));};input.oninput=search;search();return;
+ }
+ if(page === 'files' || page === 'agent') {
+  root.append(text('p',page==='files'?'SUA BIBLIOTECA':'AGENT','eyebrow'),text('h1',page==='files'?'Um lugar para suas referências.':'Seu agente, em um espaço separado.'),text('p',page==='files'?'O envio de arquivos ainda não está conectado. Seus rascunhos ficam disponíveis em Pesquisar.':'O agente com ferramentas administrativas permanece no painel administrativo. Esta área pública não concede acesso a ele.','intro'));return;
+ }
+ root.classList.add('chat-page');root.classList.toggle('conversation',page==='chat'&&!!user.currentChat?.messages?.length);const p=pages[page]; root.append(text('p',p[0],'eyebrow'),text('h1',page==='chat'?'Como posso ajudar?':p[1]),text('p',p[2],'intro'));
+ if(page==='chat'&&user.currentChat?.messages?.length){const thread=document.createElement('section');thread.className='chat-thread';thread.setAttribute('aria-label','Histórico da conversa');for(const message of user.currentChat.messages){const item=document.createElement('article');item.className='chat-message '+message.role;item.append(text('small',message.role==='user'?'Você':'Chat Forgenox'),renderMessageText(message.content));if(message.role==='assistant'){const copy=text('button','Copiar resposta','copy-response');copy.onclick=()=>navigator.clipboard.writeText(message.content).then(()=>copy.textContent='Copiado').catch(()=>copy.textContent='Não foi possível copiar');item.append(copy)}thread.append(item)}root.append(thread)}
+ const box=document.createElement('div');box.className='composer';
+ const prompt=document.createElement('textarea');prompt.placeholder=p[3];prompt.setAttribute('aria-label','Descreva sua criação');prompt.maxLength=10000;prompt.value=user.drafts.find(d=>d.kind===page)?.prompt || '';box.append(prompt);
+ if(page==='chat'){const tools=text('div','','quick-tools');for(const [kind,label] of [['images','▧ Criar imagem'],['video','▷ Criar vídeo'],['music','♫ Criar música']]){const b=text('button',label);b.onclick=()=>render(kind);tools.append(b)}box.append(tools)}const options={}; if(page!=='chat') addMediaControls(box,page,options);
+ const bar=document.createElement('div');bar.className='composer-bar';bar.append(text('span',page==='chat'?'GPT-6.1 Sol · Raciocínio médio':'Rascunho de criação','chip'));const save=text('button','Salvar ideia','save-idea');bar.append(save);box.append(bar);root.append(box);if(page==='chat')box.append(text('p','Enter envia · Shift + Enter quebra a linha','keyboard-hint'));
+ const send=page==='chat'?text('button','Enviar mensagem','primary'):null;if(send){send.id='chat-send';send.disabled=chatBusy;bar.append(send);}
+ const generate=page==='chat'?null:text('button',user.mediaConnected?'Gerar agora':'Geração indisponível','primary');if(generate){generate.disabled=!user.mediaConnected;bar.append(generate);}
+ root.append(text('p',page==='chat'?'Pesquisa web automática para dados atuais. Confira as fontes. As conversas ficam na sua conta.':user.mediaConnected?'Gerar utiliza os créditos da conta fal.ai do administrador. Os resultados ficam no seu histórico; os links dos arquivos são hospedados pela fal.ai e podem expirar.':'A geração ainda não está conectada. Você pode salvar sua ideia para depois.','notice'));
+ const status=text('p','','status');status.setAttribute('role','status');root.append(status);
+ save.onclick=async()=>{save.disabled=true;try{await api('draft',{kind:page,prompt:prompt.value});const d=user.drafts.find(d=>d.kind===page);if(d)d.prompt=prompt.value;else user.drafts.push({kind:page,prompt:prompt.value});renderHistory();status.textContent='Ideia salva na sua conta.';}catch(e){status.textContent=e.message;}finally{save.disabled=false}};
+ if(send)send.onclick=async()=>{const message=prompt.value.trim();if(!message||chatBusy)return;chatBusy=true;const person=user;const selected=user.currentChat?.id;const previousMessages=[...(user.currentChat?.messages||[])];send.disabled=true;prompt.disabled=true;send.textContent='Pensando…';let thread=root.querySelector('.chat-thread');if(!thread){thread=document.createElement('section');thread.className='chat-thread';root.insertBefore(thread,box)}root.classList.add('conversation');thread.setAttribute('aria-label','Histórico da conversa');const sent=text('article','','chat-message user');sent.append(text('small','Você'),text('div',message));thread.append(sent);prompt.value='';const started=Date.now();const thinking=text('span','Pensando…','thinking-label');const dots=document.createElement('span');dots.className='thinking-dots';dots.setAttribute('aria-hidden','true');for(let i=0;i<3;i++)dots.append(document.createElement('i'));const elapsed=text('span','0s','thinking-time');elapsed.setAttribute('aria-hidden','true');const hint=text('span','Estou preparando sua resposta.','thinking-hint');status.classList.add('thinking');status.replaceChildren(dots,thinking,elapsed,hint);thread.append(status);thread.scrollTop=thread.scrollHeight;const waiting=setInterval(()=>{const seconds=Math.floor((Date.now()-started)/1000);elapsed.textContent=seconds+'s';if(seconds===20)hint.textContent='Ainda pensando. Respostas mais completas podem levar um pouco mais de tempo.';},1000);try{const result=await api('chat',{message,chatId:selected});if(user!==person)return;person.chats=await api('chats');const stillSelected=person.currentChat?.id===selected;if(stillSelected)person.currentChat={id:result.chatId,title:result.title,messages:[...previousMessages,{role:'user',content:message},{role:'assistant',content:result.reply}]};const d=person.drafts.find(d=>d.kind==='chat');if(d)d.prompt='';await api('draft',{kind:'chat',prompt:''});chatBusy=false;renderHistory();if(page==='chat'&&stillSelected)render('chat');}catch(error){if(user===person){status.textContent=error.message;sent.remove();prompt.value=message;}}finally{chatBusy=false;if($('#chat-send'))$('#chat-send').disabled=false;clearInterval(waiting);status.classList.remove('thinking');prompt.disabled=false;send.disabled=false;send.textContent='Enviar mensagem'}};
+ if(send)prompt.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!send.disabled)send.click();}};
+ if(generate)generate.onclick=async()=>{if(!prompt.value.trim()){status.textContent='Descreva o que você quer criar.';return;}generate.disabled=true;try{const job=await api('media',{kind:page,prompt:prompt.value,options});user.jobs.unshift(job);status.textContent='Pedido enviado. Acompanhe abaixo.';renderMediaResults(results,page);}catch(e){status.textContent=e.message;user.jobs=await api('media').catch(()=>user.jobs);renderMediaResults(results,page);}finally{generate.disabled=!user.mediaConnected}};
+ const results=document.createElement('section');results.className='media-results';root.append(results);if(page!=='chat')renderMediaResults(results,page);
+ const samples=page==='images'?['Retrato em luz natural','Paisagem de outro mundo','Identidade visual minimalista']:page==='video'?['Uma cidade ao amanhecer','Produto em movimento','Uma cena cinematográfica']:page==='music'?['Piano para concentrar','Eletrônica ao pôr do sol','Uma trilha de aventura']:['Planejar uma criação','Explorar uma ideia','Escrever um roteiro'];
+ const cards=document.createElement('div');cards.className='suggestions';for(const sample of samples){const b=document.createElement('button');b.append(text('b',sample),text('span','Usar como ponto de partida ↗'));b.onclick=()=>{prompt.value=sample;prompt.focus()};cards.append(b)}root.append(cards);if(page==='chat'&&user.currentChat?.messages?.length)requestAnimationFrame(()=>{const thread=root.querySelector('.chat-thread');if(thread)thread.scrollTop=thread.scrollHeight});
+}
+async function load() { try {user=await api('me');user.jobs=await api('media');user.chats=await api('chats');$('#auth').hidden=true;$('#shell').hidden=false;$('#email').textContent=user.email;$('#avatar').textContent=user.email[0].toUpperCase();renderHistory();render(page);}catch{$('#auth').hidden=false;$('#shell').hidden=true;} }
+$('#auth-form').onsubmit=async e=>{e.preventDefault();const button=$('#auth-submit');button.disabled=true;$('#auth-status').textContent='';try{await api(creating?'register':'login',Object.fromEntries(new FormData(e.target)));e.target.reset();await load();}catch(error){$('#auth-status').textContent=error.message;}finally{button.disabled=false}};
+$('#auth-toggle').onclick=()=>{creating=!creating;$('#auth-submit').textContent=creating?'Criar conta':'Entrar';$('#auth-toggle').textContent=creating?'Já tem conta? Entrar':'Ainda não tem conta? Criar conta';$('#auth-form [name=password]').autocomplete=creating?'new-password':'current-password';$('#auth-status').textContent='';};
+$('#logout').onclick=async()=>{try{await api('logout',{});user=null;$('#shell').hidden=true;$('#auth').hidden=false;}catch{alert('Não foi possível sair. Tente novamente.')}};
+for(const b of document.querySelectorAll('[data-page]'))b.onclick=()=>{if(b.dataset.page==='chat')user.currentChat=null;render(b.dataset.page)};
+for(const b of document.querySelectorAll('[data-mode]'))b.onclick=()=>{document.querySelectorAll('[data-mode]').forEach(v=>v.classList.toggle('selected',v===b));render(b.dataset.mode)};
+$('#mobile-menu').onclick=()=>$('#sidebar').classList.toggle('open');
+const resetToken=new URLSearchParams(location.hash.slice(1)).get('reset');
+if(resetToken){history.replaceState(null,'',location.pathname+location.search);showPasswordReset(resetToken)}else load();
+
+function addMediaControls(box,kind,options){
+ const controls=document.createElement('div');controls.className='media-controls';
+ controls.append(text('span',modelNames[kind],'chip'));
+ const select=(label,values,key)=>{const field=document.createElement('label');field.append(text('span',label));const input=document.createElement('select');input.setAttribute('aria-label',label);for(const value of values){const item=document.createElement('option');item.value=value;item.textContent=value;input.append(item)}options[key]=values[0];input.onchange=()=>options[key]=input.value;field.append(input);controls.append(field)};
+ if(kind==='images')select('Formato',['1:1','16:9','9:16','4:3','3:4'],'ratio');
+ if(kind==='video'){select('Formato',['16:9','9:16'],'ratio');select('Duração',['4s','6s','8s'],'duration');select('Resolução',['720p','1080p'],'resolution');const label=document.createElement('label');const audio=document.createElement('input');audio.type='checkbox';audio.checked=true;options.audio=true;audio.onchange=()=>options.audio=audio.checked;label.append(audio,text('span','Áudio'));controls.append(label)}
+ if(kind==='music'){const field=document.createElement('label');field.className='lyrics-field';field.append(text('span','Letra (opcional)'));const lyrics=document.createElement('textarea');lyrics.placeholder='Escreva sua letra ou deixe vazio para criar a partir da descrição…';lyrics.maxLength=5000;lyrics.setAttribute('aria-label','Letra da música');lyrics.oninput=()=>options.lyrics=lyrics.value;field.append(lyrics);controls.append(field)}
+ box.append(controls);
+}
+function renderMediaResults(root,kind){
+ clearTimeout(mediaTimer);root.replaceChildren();
+ const jobs=(user.jobs||[]).filter(j=>j.kind===kind);
+ if(!jobs.length)return;
+ root.append(text('h2','Suas criações'));
+ const labels={SUBMITTING:'Enviando',IN_QUEUE:'Na fila',IN_PROGRESS:'Gerando',COMPLETED:'Concluído',FAILED:'Não foi possível gerar',UNKNOWN:'Envio não confirmado — contate o administrador antes de repetir'};
+ for(const job of jobs){const card=document.createElement('article');card.className='media-result';card.append(text('p',job.prompt),text('small',labels[job.status]||job.status));if(job.error)card.append(text('p','Motivo: '+job.error,'media-error'));for(const result of job.result||[]){const element=document.createElement(kind==='images'?'img':kind==='video'?'video':'audio');element.src=result.url;if(kind==='images'){element.alt=job.prompt;element.loading='lazy';}else{element.controls=true;element.preload='metadata'}card.append(element);const link=text('a','Abrir arquivo ↗');link.href=result.url;link.target='_blank';link.rel='noopener noreferrer';card.append(link)}root.append(card)}
+ const pending=jobs.filter(j=>['IN_QUEUE','IN_PROGRESS'].includes(j.status));
+ if(pending.length)mediaTimer=setTimeout(async()=>{if(!user||page!==kind)return;for(const job of pending){try{const fresh=await api('media/'+job.id);const i=user.jobs.findIndex(j=>j.id===job.id);if(i>=0)user.jobs[i]=fresh;}catch{}}if(page===kind&&root.isConnected)renderMediaResults(root,kind)},5000);
+}
+
+function renderMessageText(value){
+ const root=document.createElement('div');root.className='markdown';
+ const inline=(parent,value)=>{const re=/(`[^`]+`|\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<>]+)/g;let start=0;for(const m of value.matchAll(re)){parent.append(document.createTextNode(value.slice(start,m.index)));let node;if(m[0].startsWith('`'))node=text('code',m[0].slice(1,-1));else if(m[0].startsWith('**'))node=text('strong',m[0].slice(2,-2));else{const link=m[0].match(/^\[([^\]]+)\]\((.+)\)$/);node=text('a',link?link[1]:m[0]);node.href=link?link[2]:m[0];node.target='_blank';node.rel='noopener noreferrer'}parent.append(node);start=m.index+m[0].length}parent.append(document.createTextNode(value.slice(start)))};
+ const lines=String(value).split('\n');let i=0;
+ const cells=line=>line.trim().replace(/^\||\|$/g,'').split('|').map(x=>x.trim());
+ while(i<lines.length){let line=lines[i];if(!line.trim()){i++;continue}
+ if(line.startsWith('```')){const language=line.slice(3).trim();let code='';i++;while(i<lines.length&&!lines[i].startsWith('```'))code+=lines[i++]+'\n';i++;const panel=text('section','','code-panel');const bar=text('div',language||'Código','code-bar');const copy=text('button','Copiar');copy.onclick=()=>navigator.clipboard.writeText(code).then(()=>copy.textContent='Copiado').catch(()=>copy.textContent='Falha ao copiar');bar.append(copy);const pre=document.createElement('pre');pre.append(text('code',code));panel.append(bar,pre);root.append(panel);continue}
+ if(i+1<lines.length&&line.includes('|')&&/^\s*\|?\s*:?-{3,}/.test(lines[i+1])){const wrap=text('div','','table-scroll');const table=document.createElement('table');const head=document.createElement('thead');const tr=document.createElement('tr');for(const c of cells(line)){const th=document.createElement('th');inline(th,c);tr.append(th)}head.append(tr);table.append(head);i+=2;const body=document.createElement('tbody');while(i<lines.length&&lines[i].includes('|')){const row=document.createElement('tr');for(const c of cells(lines[i++])){const td=document.createElement('td');inline(td,c);row.append(td)}body.append(row)}table.append(body);wrap.append(table);root.append(wrap);continue}
+ const heading=line.match(/^(#{1,6})\s+(.+)/);if(heading){const h=document.createElement('h'+Math.min(heading[1].length+1,6));inline(h,heading[2]);root.append(h);i++;continue}
+ if(/^\s*([-*+] |\d+\. )/.test(line)){const ordered=/^\s*\d+\./.test(line);const list=document.createElement(ordered?'ol':'ul');while(i<lines.length&&(ordered?/^\s*\d+\. /:/^\s*[-*+] /).test(lines[i])){const li=document.createElement('li');inline(li,lines[i++].replace(/^\s*(?:[-*+]|\d+\.)\s+/,''));list.append(li)}root.append(list);continue}
+ const paragraph=document.createElement(line.startsWith('> ')?'blockquote':'p');inline(paragraph,line.replace(/^> /,''));root.append(paragraph);i++;
+ }return root;
+}
+
+const creationSamples={
+ images:[['Retratos','Retrato editorial','Retrato editorial de uma pessoa em luz natural suave, fundo neutro, fotografia profissional.','portrait'],['Marca','Marca minimalista','Identidade visual minimalista, formas geométricas, composição elegante, sem texto.','brand'],['Produtos','Fotografia de produto','Fotografia publicitária de um frasco de perfume, luz lateral, reflexos suaves, fundo escuro.','product'],['Arte','Mundo imaginário','Paisagem de outro mundo, montanhas de cristal, luz azul e cobre, composição cinematográfica.','world'],['Marketing','Post para Instagram','Crie uma arte para Instagram com composição editorial, título curto e hierarquia visual clara.','poster'],['Arte','Ilustração 3D','Ilustração 3D de uma raposa de cobre simpática sobre fundo grafite, iluminação de estúdio.','sculpture']],
+ video:[['Produtos','Produto em movimento','Um frasco de perfume em uma base de pedra, câmera se aproxima lentamente, luz dourada e reflexos delicados.','product'],['Paisagens','O início de um novo dia','Vista aérea de montanhas ao amanhecer, neblina entre os vales, movimento de câmera suave.','world'],['Cinema','Cena cinematográfica','Uma rua à noite sob chuva leve, reflexos de neon no asfalto, câmera em movimento lento.','poster'],['Animação','Universo criativo','Animação 3D de formas abstratas em cobre e azul que se transformam suavemente.','sculpture']],
+ music:[['Lo-fi','Fim de tarde','Uma faixa lo-fi relaxante com piano elétrico, bateria suave e atmosfera de fim de tarde.','world'],['Piano','Um momento de calma','Uma composição delicada de piano para concentração, andamento lento e atmosfera acolhedora.','brand'],['Eletrônica','Depois da meia-noite','Música eletrônica atmosférica com sintetizadores, baixo pulsante e ritmo envolvente.','poster'],['Cinema','Uma nova aventura','Trilha cinematográfica épica, cordas e percussão, crescente emocional de aventura.','sculpture'],['Jazz','Café da manhã','Jazz suave com piano acústico, contrabaixo e bateria com vassourinhas.','product'],['Pop','Novos caminhos','Uma canção pop em português sobre novos caminhos, melodia marcante e refrão otimista.','portrait']]
+};
+const promptMemory={};
+function renderCreationPage(root,kind){
+ root.className='creation-page '+kind+'-page';
+ const title={images:'Que imagem você gostaria de criar?',video:'Que vídeo você gostaria de criar?',music:'Que música você gostaria de criar?'}[kind];
+ const heading=text('div','','creation-heading');heading.append(text('span',{images:'▧',video:'▷',music:'♫'}[kind],'creation-symbol'),text('h1',title));root.append(heading);
+ const box=text('div','','creation-composer');
+ const prompt=document.createElement('textarea');prompt.placeholder={images:'Descreva a imagem que você quer criar…',video:'Descreva a cena, o movimento e a atmosfera…',music:'Descreva a música, o estilo e o sentimento…'}[kind];prompt.setAttribute('aria-label','Descreva sua criação');prompt.maxLength=5000;prompt.value=promptMemory[kind]??user.drafts.find(d=>d.kind===kind)?.prompt??'';prompt.oninput=()=>promptMemory[kind]=prompt.value;
+ const options={};let lyrics,style,instrumental;
+ if(kind==='music'){const tabs=text('div','','music-mode');for(const label of ['Simples','Personalizado']){const b=text('button',label);b.classList.toggle('selected',label==='Simples');b.onclick=()=>{tabs.querySelectorAll('button').forEach(x=>x.classList.toggle('selected',x===b));lyrics.hidden=label==='Simples';};tabs.append(b)}root.append(tabs)}
+ box.append(prompt);const controls=text('div','','creation-controls');
+ if(kind==='images'){const label=text('label','','style-select');label.append(text('span','Estilo'));style=document.createElement('select');style.setAttribute('aria-label','Estilo da imagem');for(const name of ['Automático','Fotografia','Cinematográfico','Ilustração 3D','Minimalista','Editorial'])style.append(text('option',name));label.append(style);controls.append(label)}
+ addMediaControls(controls,kind,options);
+ if(kind==='music'){lyrics=controls.querySelector('.lyrics-field');lyrics.hidden=true;box.append(lyrics);const toggle=text('label','','instrumental-toggle');instrumental=document.createElement('input');instrumental.type='checkbox';toggle.append(instrumental,text('span','Instrumental'));controls.append(toggle);}
+ const model=text('span',modelNames[kind],'creation-model');model.title='Modelo utilizado nesta criação';controls.append(model);
+ const generate=text('button','✦ Gerar','generate-button');generate.disabled=!user.mediaConnected;controls.append(generate);box.append(controls);root.append(box);
+ const note=text('p',kind==='images'?'Links de sites podem servir de referência de conteúdo. Cada geração cria uma imagem.':kind==='music'?'Descreva o estilo. Para incluir sua letra, escolha Personalizado.':'Defina o formato, a duração e se deseja gerar áudio.','creation-note');root.append(note);
+ const status=text('p','','creation-status');status.setAttribute('role','status');root.append(status);
+ const library=text('section','','creation-library');const libraryHead=text('div','','library-heading');libraryHead.append(text('h2','O que vamos criar?'));const save=text('button','Salvar ideia','save-idea');libraryHead.append(save);library.append(libraryHead);
+ const filters=text('div','','gallery-filters');library.append(filters);const gallery=text('div','','creation-gallery');library.append(gallery);root.append(library);
+ const categories=['Minhas criações','Ideias prontas',...new Set(creationSamples[kind].map(x=>x[0]))];let selected=(user.jobs||[]).some(j=>j.kind===kind)?'Minhas criações':'Ideias prontas';
+ const paint=()=>{
+  clearTimeout(mediaTimer);filters.replaceChildren();gallery.replaceChildren();gallery.classList.toggle('own-creations',selected==='Minhas criações');
+  for(const category of categories){const b=text('button',category);b.classList.toggle('selected',category===selected);b.setAttribute('aria-pressed',String(category===selected));b.onclick=()=>{selected=category;paint()};filters.append(b)}
+  if(selected==='Minhas criações'){
+   const jobs=(user.jobs||[]).filter(j=>j.kind===kind);if(!jobs.length){const empty=text('div','','gallery-empty');empty.append(text('span',{images:'▧',video:'▷',music:'♫'}[kind]),text('h3','Suas criações começam aqui.'),text('p','Escreva uma ideia acima ou escolha um ponto de partida.'));gallery.append(empty)}
+   for(const job of jobs)gallery.append(creationCard(job,kind));
+   const pending=jobs.filter(j=>['IN_QUEUE','IN_PROGRESS'].includes(j.status));if(pending.length)mediaTimer=setTimeout(async()=>{if(page!==kind||!root.isConnected)return;for(const job of pending){try{const fresh=await api('media/'+job.id);const index=user.jobs.findIndex(j=>j.id===job.id);if(index>=0)user.jobs[index]=fresh}catch{}}if(root.isConnected&&selected==='Minhas criações')paint()},5000);
+  }else for(const [category,title,preset,art] of creationSamples[kind].filter(x=>selected==='Ideias prontas'||x[0]===selected)){
+   const card=text('button','','template-card '+art);card.append(text('span',kind==='music'?'♫':kind==='video'?'▷':'✧','template-symbol'));const caption=text('div','','template-caption');caption.append(text('strong',title),text('small',category+' · Usar ideia ↗'));card.append(caption);card.onclick=()=>{prompt.value=preset;promptMemory[kind]=preset;prompt.focus();box.scrollIntoView({behavior:'smooth',block:'center'})};gallery.append(card)
+  }
+ };
+ save.onclick=async()=>{save.disabled=true;try{await api('draft',{kind,prompt:prompt.value});const d=user.drafts.find(d=>d.kind===kind);if(d)d.prompt=prompt.value;else user.drafts.push({kind,prompt:prompt.value});renderHistory();status.textContent='Ideia salva.'}catch(e){status.textContent=e.message}finally{save.disabled=false}};
+ generate.onclick=async()=>{
+  if(!prompt.value.trim()){status.textContent='Descreva o que você quer criar.';prompt.focus();return}
+  const person=user;generate.disabled=true;generate.textContent='Enviando…';box.setAttribute('aria-busy','true');status.textContent=kind==='images'&&/https?:/.test(prompt.value)?'Lendo a referência e preparando a imagem…':'Preparando sua criação…';
+  try{const value=(instrumental?.checked?'Crie uma música instrumental, sem vocais. ':'')+prompt.value.trim()+(style&&style.value!=='Automático'?'\nEstilo visual: '+style.value:'');const job=await api('media',{kind,prompt:value,options});if(user!==person)return;person.jobs.unshift(job);selected='Minhas criações';status.textContent='Pedido recebido. A geração aparece abaixo.';paint();gallery.scrollIntoView({behavior:'smooth',block:'start'})}catch(e){if(user!==person)return;status.textContent=e.message;person.jobs=await api('media').catch(()=>person.jobs);selected='Minhas criações';paint()}finally{generate.disabled=!person.mediaConnected;generate.textContent='✦ Gerar';box.removeAttribute('aria-busy')}
+ };
+ paint();
+}
+function creationCard(job,kind){
+ const card=text('article','','creation-card '+(job.status==='FAILED'?'failed':''));
+ const labels={SUBMITTING:'Enviando',IN_QUEUE:'Na fila',IN_PROGRESS:'Gerando sua criação…',COMPLETED:'Concluído',FAILED:'Não foi possível gerar',UNKNOWN:'Envio não confirmado. Consulte o administrador antes de repetir.'};
+ const stage=text('div','','creation-preview');
+ if(job.status==='COMPLETED'&&job.result?.length){
+  for(const file of job.result){if(kind==='images'){const button=text('button','','image-preview');button.setAttribute('aria-label','Ampliar imagem: '+job.prompt);const img=document.createElement('img');img.src=file.url;img.alt=job.prompt;img.loading='lazy';button.append(img,text('span','⤢ Ampliar','expand-label'));button.onclick=()=>openCreation(job,kind,file);stage.append(button)}else if(kind==='video'){const video=document.createElement('video');video.src=file.url;video.controls=true;video.preload='metadata';video.playsInline=true;stage.append(video)}else{stage.classList.add('audio-preview');stage.append(text('div','♫','audio-art'));const audio=document.createElement('audio');audio.src=file.url;audio.controls=true;audio.preload='metadata';stage.append(audio)}}
+ }else{stage.classList.add('generation-placeholder');stage.append(text('span',job.status==='FAILED'?'!':'✦',job.status==='FAILED'?'error-symbol':'generation-spinner'),text('p',labels[job.status]||job.status));}
+ card.append(stage);const caption=text('div','','creation-caption');caption.append(text('p',job.prompt,'creation-prompt'));const meta=text('div','','creation-meta');meta.append(text('small',modelNames[kind]),text('small',new Date(job.created).toLocaleDateString('pt-BR')));caption.append(meta);
+ if(job.error){const details=document.createElement('details');details.append(text('summary','Ver motivo do erro'),text('p',job.error));caption.append(details)}
+ const actions=text('div','','creation-actions');if(job.status==='COMPLETED'){const view=text('button',kind==='images'?'⤢ Ver imagem':'Abrir detalhes');view.onclick=()=>openCreation(job,kind,job.result[0]);actions.append(view);const link=text('a','Abrir original ↗');link.href=job.result[0].url;link.target='_blank';link.rel='noopener noreferrer';actions.append(link)}const reuse=text('button','Usar descrição');reuse.onclick=()=>{const input=$('.creation-composer>textarea');input.value=job.prompt;promptMemory[kind]=job.prompt;input.focus();input.scrollIntoView({behavior:'smooth',block:'center'})};actions.append(reuse);caption.append(actions);card.append(caption);return card;
+}
+function openCreation(job,kind,file){
+ const dialog=text('dialog','','creation-viewer');dialog.setAttribute('aria-label','Visualização da criação');const toolbar=text('div','','viewer-toolbar');toolbar.append(text('strong',kind==='images'?'Sua imagem':kind==='video'?'Seu vídeo':'Sua música'));const link=text('a','Abrir original ↗');link.href=file.url;link.target='_blank';link.rel='noopener noreferrer';toolbar.append(link);
+ const close=text('button','✕');close.setAttribute('aria-label','Fechar visualização');close.onclick=()=>dialog.close();toolbar.append(close);dialog.append(toolbar);
+ const stage=text('div','','viewer-stage');let media=document.createElement(kind==='images'?'img':kind==='video'?'video':'audio');media.src=file.url;if(kind==='images'){media.alt=job.prompt;const zoom=text('button','Zoom 100%');zoom.onclick=()=>{const expanded=stage.classList.toggle('zoomed');zoom.textContent=expanded?'Ajustar à tela':'Zoom 100%'};toolbar.insertBefore(zoom,close)}else{media.controls=true;media.preload='metadata'}stage.append(media);dialog.append(stage);const detail=text('div','','viewer-description');detail.append(text('small',modelNames[kind]),text('p',job.prompt));dialog.append(detail);document.body.append(dialog);dialog.addEventListener('close',()=>{media.pause?.();dialog.remove()},{once:true});dialog.addEventListener('click',e=>{if(e.target===dialog)dialog.close()});dialog.showModal();
+}
+
+async function showPasswordReset(token){
+ $('#shell').hidden=true;$('#auth').hidden=false;const card=$('.auth-card');
+ const brand=text('div','✳ Chat Forgenox','brand');const title=text('h1','Crie sua nova senha.');const intro=text('p','Validando seu link…','muted');card.replaceChildren(brand,title,intro);
+ try{
+  const info=await api('password-reset/check',{token});intro.textContent='Conta: '+info.email;
+  const form=document.createElement('form');const fields=[];
+  for(const labelText of ['Nova senha','Confirme a nova senha']){const label=text('label',labelText);const input=document.createElement('input');input.type='password';input.autocomplete='new-password';input.minLength=12;input.maxLength=256;input.required=true;input.setAttribute('aria-label',labelText);label.append(input);fields.push(input);form.append(label)}
+  const submit=text('button','Salvar nova senha','primary');submit.type='submit';const status=text('p','','status');status.setAttribute('role','status');form.append(text('p','Use pelo menos 12 caracteres. Este link pode ser usado uma única vez.','fine'),submit,status);card.append(form);
+  form.onsubmit=async e=>{e.preventDefault();if(fields[0].value!==fields[1].value){status.textContent='As senhas não coincidem.';return}submit.disabled=true;try{await api('password-reset',{token,password:fields[0].value});form.reset();form.replaceChildren(text('p','Senha redefinida. Suas conversas e criações foram preservadas.','muted'));const login=text('a','Entrar na minha conta','primary');login.href='/studio/';form.append(login)}catch(error){status.textContent=error.message;submit.disabled=false}};
+ }catch(error){intro.textContent=error.message;const back=text('a','Voltar para entrar');back.href='/studio/';card.append(back)}
+}
