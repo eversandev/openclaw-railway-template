@@ -60,7 +60,8 @@ $('#logout').onclick=async()=>{try{await api('logout',{});user=null;$('#shell').
 for(const b of document.querySelectorAll('[data-page]'))b.onclick=()=>{if(b.dataset.page==='chat')user.currentChat=null;render(b.dataset.page)};
 for(const b of document.querySelectorAll('[data-mode]'))b.onclick=()=>{document.querySelectorAll('[data-mode]').forEach(v=>v.classList.toggle('selected',v===b));render(b.dataset.mode)};
 $('#mobile-menu').onclick=()=>$('#sidebar').classList.toggle('open');
-load();
+const resetToken=new URLSearchParams(location.hash.slice(1)).get('reset');
+if(resetToken){history.replaceState(null,'',location.pathname+location.search);showPasswordReset(resetToken)}else load();
 
 function addMediaControls(box,kind,options){
  const controls=document.createElement('div');controls.className='media-controls';
@@ -155,4 +156,16 @@ function openCreation(job,kind,file){
  const dialog=text('dialog','','creation-viewer');dialog.setAttribute('aria-label','Visualização da criação');const toolbar=text('div','','viewer-toolbar');toolbar.append(text('strong',kind==='images'?'Sua imagem':kind==='video'?'Seu vídeo':'Sua música'));const link=text('a','Abrir original ↗');link.href=file.url;link.target='_blank';link.rel='noopener noreferrer';toolbar.append(link);
  const close=text('button','✕');close.setAttribute('aria-label','Fechar visualização');close.onclick=()=>dialog.close();toolbar.append(close);dialog.append(toolbar);
  const stage=text('div','','viewer-stage');let media=document.createElement(kind==='images'?'img':kind==='video'?'video':'audio');media.src=file.url;if(kind==='images'){media.alt=job.prompt;const zoom=text('button','Zoom 100%');zoom.onclick=()=>{const expanded=stage.classList.toggle('zoomed');zoom.textContent=expanded?'Ajustar à tela':'Zoom 100%'};toolbar.insertBefore(zoom,close)}else{media.controls=true;media.preload='metadata'}stage.append(media);dialog.append(stage);const detail=text('div','','viewer-description');detail.append(text('small',modelNames[kind]),text('p',job.prompt));dialog.append(detail);document.body.append(dialog);dialog.addEventListener('close',()=>{media.pause?.();dialog.remove()},{once:true});dialog.addEventListener('click',e=>{if(e.target===dialog)dialog.close()});dialog.showModal();
+}
+
+async function showPasswordReset(token){
+ $('#shell').hidden=true;$('#auth').hidden=false;const card=$('.auth-card');
+ const brand=text('div','✳ Chat Forgenox','brand');const title=text('h1','Crie sua nova senha.');const intro=text('p','Validando seu link…','muted');card.replaceChildren(brand,title,intro);
+ try{
+  const info=await api('password-reset/check',{token});intro.textContent='Conta: '+info.email;
+  const form=document.createElement('form');const fields=[];
+  for(const labelText of ['Nova senha','Confirme a nova senha']){const label=text('label',labelText);const input=document.createElement('input');input.type='password';input.autocomplete='new-password';input.minLength=12;input.maxLength=256;input.required=true;input.setAttribute('aria-label',labelText);label.append(input);fields.push(input);form.append(label)}
+  const submit=text('button','Salvar nova senha','primary');submit.type='submit';const status=text('p','','status');status.setAttribute('role','status');form.append(text('p','Use pelo menos 12 caracteres. Este link pode ser usado uma única vez.','fine'),submit,status);card.append(form);
+  form.onsubmit=async e=>{e.preventDefault();if(fields[0].value!==fields[1].value){status.textContent='As senhas não coincidem.';return}submit.disabled=true;try{await api('password-reset',{token,password:fields[0].value});form.reset();form.replaceChildren(text('p','Senha redefinida. Suas conversas e criações foram preservadas.','muted'));const login=text('a','Entrar na minha conta','primary');login.href='/studio/';form.append(login)}catch(error){status.textContent=error.message;submit.disabled=false}};
+ }catch(error){intro.textContent=error.message;const back=text('a','Voltar para entrar');back.href='/studio/';card.append(back)}
 }

@@ -50,11 +50,12 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const assets = fileURLToPath(new URL('./public/studio/', import.meta.url));
 
 // Separate accounts: no gateway token, owner tools or private workspace is sent to visitors.
-export function mountStudio(app, { stateDir, secureCookies = true, falKey = process.env.FAL_KEY, falFetch = fetch, chatRunner = runStudioChat, referenceReader = readImageReference }) {
+export function mountStudio(app, { stateDir, secureCookies = true, falKey = process.env.FAL_KEY, falFetch = fetch, chatRunner = runStudioChat, referenceReader = readImageReference, resetGrant = {email:process.env.STUDIO_RESET_EMAIL,tokenHash:process.env.STUDIO_RESET_TOKEN_HASH,expires:Number(process.env.STUDIO_RESET_EXPIRES)} }) {
   fs.mkdirSync(stateDir, { recursive: true });
   const db = new DatabaseSync(path.join(stateDir, 'studio.sqlite'));
   db.exec(`PRAGMA journal_mode=WAL;
     CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE, salt TEXT, password TEXT);
+    CREATE TABLE IF NOT EXISTS password_resets (token_hash TEXT PRIMARY KEY,email TEXT,expires INTEGER,used INTEGER DEFAULT 0);
     CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id TEXT, expires INTEGER);
     CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY,user_id TEXT,title TEXT,created INTEGER);
     CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT,role TEXT,content TEXT);
@@ -63,6 +64,7 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
     CREATE TABLE IF NOT EXISTS drafts (user_id TEXT, kind TEXT, prompt TEXT, PRIMARY KEY(user_id,kind));`);
   if(!db.prepare('PRAGMA table_info(media_jobs)').all().some(c=>c.name==='error'))db.exec('ALTER TABLE media_jobs ADD COLUMN error TEXT');
   fs.chmodSync(path.join(stateDir, 'studio.sqlite'), 0o600);
+  if(resetGrant&&/^[a-f0-9]{64}$/.test(resetGrant.tokenHash||'')&&typeof resetGrant.email==='string'&&Number.isSafeInteger(resetGrant.expires)&&resetGrant.expires>Date.now())db.prepare('INSERT OR IGNORE INTO password_resets (token_hash,email,expires) VALUES (?,?,?)').run(resetGrant.tokenHash,resetGrant.email.trim().toLowerCase(),resetGrant.expires);
   const router = express.Router();
   const cookieName = secureCookies ? '__Host-studio' : 'studio-local';
   const cookie = (token, age) => `${cookieName}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${age}${secureCookies ? '; Secure' : ''}`;
@@ -123,6 +125,23 @@ export function mountStudio(app, { stateDir, secureCookies = true, falKey = proc
       db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(hash(token), user.id, Date.now() + 86400000);
       res.set('Set-Cookie', cookie(token, 86400)).json({ ok: true });
     } catch { res.status(400).json({ error: 'Não foi possível concluir. Tente novamente.' }); }
+  });
+  const resetRecord = token => typeof token==='string'&&/^[a-f0-9]{64}$/.test(token)?db.prepare('SELECT r.token_hash,u.id,u.email FROM password_resets r JOIN users u ON u.email=r.email WHERE r.token_hash=? AND r.used=0 AND r.expires>?').get(hash(token),Date.now()):null;
+  router.post('/api/password-reset/check',(req,res)=>{
+    const record=resetRecord(req.body.token);if(!record)return res.status(400).json({error:'Este link é inválido, expirou ou já foi utilizado.'});res.json({email:record.email});
+  });
+  router.post('/api/password-reset',async(req,res)=>{
+    const record=resetRecord(req.body.token);if(!record)return res.status(400).json({error:'Este link é inválido, expirou ou já foi utilizado.'});
+    const password=req.body.password;if(typeof password!=='string'||password.length<12||password.length>256)return res.status(400).json({error:'Use uma senha de 12 a 256 caracteres.'});
+    try{
+      const salt=randomBytes(16).toString('hex');const digest=(await derive(password,salt,64)).toString('hex');
+      db.exec('BEGIN IMMEDIATE');
+      const changed=db.prepare('UPDATE password_resets SET used=1 WHERE token_hash=? AND used=0 AND expires>?').run(record.token_hash,Date.now());
+      if(!changed.changes){db.exec('ROLLBACK');return res.status(400).json({error:'Este link já foi utilizado ou expirou.'});}
+      db.prepare('UPDATE users SET salt=?,password=? WHERE id=?').run(salt,digest,record.id);
+      db.prepare('DELETE FROM sessions WHERE user_id=?').run(record.id);db.exec('COMMIT');
+      res.set('Set-Cookie',cookie('',0)).json({ok:true,email:record.email});
+    }catch{try{db.exec('ROLLBACK')}catch{}res.status(500).json({error:'Não foi possível redefinir a senha. Tente novamente.'});}
   });
   router.post('/api/logout', (req, res) => {
     const token = (req.headers.cookie || '').split(';').map(s => s.trim()).find(s => s.startsWith(cookieName + '='))?.slice(cookieName.length + 1);
